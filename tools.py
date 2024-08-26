@@ -1,6 +1,10 @@
 import numpy as np
 import pandas as pd
 import sys
+import pyaldata as pyd
+import os
+from sklearn.decomposition import PCA, FactorAnalysis
+
 
 def bin_spikes(spike_times, neuron_ids, bin_size, start_time=None, end_time=None):
 
@@ -76,25 +80,83 @@ def load_spike_data (mouse_id, dataset, probe_nb, break_rec):
 
     # transform spike times to miliseconds
 
-    st_milsec = st/sample_rate*1000
+    st_milsec = st/30000.*1000
     bin_size = 10 #in milliseconds
     start_time = 0
 
     binned_spikes = bin_spikes(st_milsec, clu, bin_size, start_time=start_time, end_time=None)# transform spike times to miliseconds
 
-    st_milsec = st/sample_rate*1000
-    bin_size = 10 #in milliseconds
-    start_time = 0
-
-    binned_spikes = bin_spikes(st_milsec, clu, bin_size, start_time=start_time, end_time=None)
-
     # select neurons for each region
 
-    neurons_str = (chan_best<break_rec) & ((labels['KSLabel']=='good').values)
-    neurons_m1 = (chan_best>=break_rec) & ((labels['KSLabel']=='good').values)
+    #neurons_str = (chan_best<break_rec) & ((labels['KSLabel']=='good').values)
+    neurons_str = chan_best<break_rec
+    #neurons_m1 = (chan_best>=break_rec) & ((labels['KSLabel']=='good').values)
+    neurons_m1 = chan_best>=break_rec
 
     binned_str = binned_spikes[neurons_str,:]
     binned_m1 = binned_spikes[neurons_m1,:]
 
     return binned_str, binned_m1
+
+# Function to compute velocity from position
+def compute_velocity(positions, dt):
+    # Calculate differences between consecutive positions
+    velocity = np.diff(positions, axis=0) / dt
+    # Append a zero velocity for the last position to keep the array shape consistent
+    velocity = np.vstack([velocity, np.zeros((1, 3))])
+    return velocity
+
+# Function to create lagged data
+def create_lagged_data(X, n_lags):
+    n_samples, n_features = X.shape
+    X_lagged = np.zeros((n_samples, n_features * n_lags))
+    for lag in range(n_lags):
+        X_lagged[lag:, lag*n_features:(lag+1)*n_features] = X[:n_samples-lag, :]
+    return X_lagged
+
+def process_data(dataset, mouse_id):
+    data_dir = '/data/mouse_data/processed/'+mouse_id+'/'+dataset+'/'
+    fname = os.path.join(data_dir, dataset+'_pyaldata.mat')
+
+    df = pyd.mat2dataframe(fname, shift_idx_fields=False, td_name='df')
+
+    df['bin_size'] = 0.01
+
+    df = pyd.remove_low_firing_neurons(df, "m1_spikes",  1)
+    df = pyd.remove_low_firing_neurons(df, "s1_spikes", 1)
+    df = pyd.remove_low_firing_neurons(df, "str_motor_spikes",  1)
+    df = pyd.remove_low_firing_neurons(df, "str_sensor_spikes", 1)
+
+    df = pyd.transform_signal(df, "m1_spikes",  'sqrt')
+    df = pyd.transform_signal(df, "s1_spikes", 'sqrt')
+    df = pyd.transform_signal(df, "str_motor_spikes",  'sqrt')
+    df = pyd.transform_signal(df, "str_sensor_spikes", 'sqrt')
+
+    df = pyd.merge_signals(df, ['m1_spikes', 's1_spikes'], 'cortical_spikes')
+    df = pyd.merge_signals(df, ['str_motor_spikes', 'str_sensor_spikes'], 'striatal_spikes')
+    df = pyd.merge_signals(df, ['m1_spikes', 's1_spikes','str_motor_spikes', 'str_sensor_spikes'], 'all_spikes')
+
+
+    df = pyd.add_firing_rates(df,'smooth')
+
+    list_of_keypoints = [col for col in df.columns if '_pos' in col]
+
+    dt = 0.01 # 10ms bins
+
+    for keypoint in list_of_keypoints:
+
+        string = keypoint
+        keypoint = string.rsplit('_', 1)[0]
+
+        df[keypoint+'_vel'] = df[keypoint+'_pos'].apply(lambda pos: compute_velocity(pos, dt))
+
+    pca_dims = 15
+
+    df = pyd.dim_reduce(df, PCA(pca_dims), "m1_rates", "m1_pca")
+    df = pyd.dim_reduce(df, PCA(pca_dims), "s1_rates", "s1_pca")
+    df = pyd.dim_reduce(df, PCA(pca_dims), "str_motor_rates", "str_motor_pca")
+    df = pyd.dim_reduce(df, PCA(pca_dims), "str_sensor_rates", "str_sensor_pca")
+
+    return df
+
 
